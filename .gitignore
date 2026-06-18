@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+env/
+
+# Tooling caches
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+
+# Scratch / temp (per workflow convention)
+tmp/
+
+# OS
+.DS_Store
+
+# Editor
+.idea/
+*.swp
+
+# Jupyter
+.ipynb_checkpoints/
