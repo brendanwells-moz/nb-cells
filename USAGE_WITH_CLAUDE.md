@@ -45,12 +45,24 @@ Heredoc pipes trigger shell safety warnings ("Unhandled node type: pipeline",
 "expansion obfuscation") that require manual approval, defeating the permission
 allowlist.
 
-#### Naming cells
+#### Naming cells — `# [name]`
 
-Name code cells with a comment of the form `# [short-name]` on the first line
-(markdown cells: `<!-- [short-name] -->`). Names are stable across reordering
-and are the preferred way to address a cell.
+**Name every cell you create** with a tag on its first line. This is the
+preferred way to address a cell: names are embedded in the source, so they
+survive reordering and file saves, and you can refer to cells by meaning in
+conversation ("edit the `load-data` cell").
+
+- Code cells: `# [short-name]` (e.g. `# [load-data]`).
+- Markdown cells: `<!-- [short-name] -->`.
+
+Names must be unique within the notebook and tersely describe the cell. The
+agent should refer to cells by these names; fall back to the nbformat `id`
+(via `list`) only when a cell is unnamed, and avoid index-based addressing
+(unstable — inserting a cell above shifts all later indices).
 ````
+
+For the full rationale and resolution order, see
+[docs/cell-naming-convention.md](./docs/cell-naming-convention.md).
 
 ## 2. settings.json permission rule
 
