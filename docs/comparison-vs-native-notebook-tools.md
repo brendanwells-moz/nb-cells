@@ -18,9 +18,10 @@ against `nb_cells.py` so you can pick the right tool per task.
 | Create a new notebook | ✅ `new` | ❌ |
 | Bulk insert | ✅ `import` (JSON array) | ❌ one at a time |
 | List cells (ids/types/preview) | ✅ `list` (JSON or `--human`) | partial — comes free with a full `Read` |
-| Suppress outputs when reading | ✅ `--no-outputs` | ❌ |
+| Read source-only / outputs-only | ✅ `--no-outputs` / `--outputs` | ❌ |
+| Execution-status sweep (ran / errored / printed, per cell) | ✅ `status` (JSON or `--human`) | partial — must eyeball a full `Read` |
 | Usable by humans / scripts / cron / other agents | ✅ it's a CLI | ❌ only inside Claude Code's tool loop |
-| Rich output rendering (images shown visually) | ❌ JSON text only (see enhancement below) | ✅ `Read` displays plots inline |
+| Rich output rendering (images shown visually) | ✅ `extract-images` writes PNG/JPEG/SVG to files, then native `Read` renders them | ✅ `Read` displays plots inline |
 | Setup / dependencies | clone + path + allowlist entry | ✅ zero — always present |
 | Requires a prior in-conversation Read | ❌ | ✅ mandatory before any edit |
 
@@ -51,8 +52,9 @@ against `nb_cells.py` so you can pick the right tool per task.
 
 - **Zero friction** — no clone, no path, no allowlist rule, nothing to keep in
   sync across machines.
-- **Visual outputs** — `Read` renders plot images inline so the model can *see*
-  them; this tool's JSON path can't (yet — see below).
+- **Visual outputs** — `Read` renders plot images inline in one step. This tool now
+  bridges that gap with `extract-images` (decode to a file → native `Read`), but
+  it's two steps vs. native's one.
 - **Holistic reasoning** — because native drops the whole notebook into context,
   the model can reason across all cells at once (good for sweeping refactors).
   This tool optimizes for the opposite: surgical, low-context, one-cell edits.
@@ -86,17 +88,24 @@ edits to small notebooks where loading the whole thing is cheap.
   **after executing the notebook**, because `NotebookEdit` changes *source*
   only and never captures new execution **outputs** (plots, printed results).
 
-## Proposed enhancement: inline plot rendering
+## Inline plot rendering (implemented)
 
 Claude Code's `Bash` tool captures this tool's stdout as **text**, so a CLI
-cannot stream an image into the model's vision directly. But cell outputs
-already store plots as **base64 PNG** in the cell JSON
-(`output.data["image/png"]`). We can compose with the native image `Read`:
+cannot stream an image into the model's vision directly. But cell outputs store
+plots as **base64** in the cell JSON (`output.data["image/png"]`), so we compose
+with the native image `Read`:
 
-> Add a flag `read <cell> --extract-images <dir>` that decodes each image output
-> to a PNG file (e.g. `<dir>/<cell>_out_<n>.png`) and prints the paths in the
-> JSON. Claude then calls the native **`Read`** tool on those paths — and `Read`
-> renders images visually.
+> `nb_cells.py extract-images <nb> <cell> [--out-dir DIR]` decodes each image
+> output (`image/png`, `image/jpeg`, `image/svg+xml`) to a file
+> (`<dir>/<cell>_out<n>.<ext>`, default `./tmp`) and prints the paths. Claude
+> then calls the native **`Read`** tool on those paths, and `Read` renders the
+> images visually.
 
-This delivers inline plot rendering without adding dependencies (`base64` and
-file writes are both stdlib). Not yet implemented.
+Shipped as a **dedicated command** (not a `read` flag) for discoverability; `read`
+also surfaces an `image_outputs` count + a `hint` pointing here whenever a cell has
+image outputs, so the path is obvious. Stdlib only (`base64` + file writes). This
+closes the one row above where native was strictly better.
+
+The same release added `status` (cross-cell execution sweep) and `--outputs`
+(outputs-only read), which together remove the remaining reasons an agent would
+drop to raw Python for post-execution output introspection.

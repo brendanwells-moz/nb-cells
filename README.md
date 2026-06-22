@@ -32,11 +32,13 @@ ln -s /path/to/nb_cells/nb_cells.py ~/bin/nb_cells
 | --- | --- |
 | `new <notebook> [--force]` | Create a new empty notebook. |
 | `list <notebook> [--human]` | List all cells (id, type, source preview). `--human` prints a table. |
-| `read`/`get <notebook> <cell-id> [...]` | Read one or more cells incl. outputs. `-C/-B/-A N` add context; `--no-outputs` omits outputs. |
+| `read`/`get <notebook> <cell-id> [...]` | Read one or more cells incl. outputs. `-C/-B/-A N` add context; `--no-outputs` = source only; `--outputs` = outputs only. Cells with image outputs surface a hint to `extract-images`. |
 | `edit <notebook> <cell-id> --file <path>` | **Full-replace** a cell's source with file contents. |
 | `add <notebook> [--after/--before/--end] [--type code\|markdown] --file <path>` | Insert a new cell. Default position: `--end`. |
 | `import <notebook> <cells.json> [--after/--before/--end]` | Bulk-insert cells from a JSON array of `{"source","type"}`. |
 | `move <notebook> <cell-id> --after/--before/--end` | Reposition a cell. |
+| `status <notebook> [--cell <id>] [--human]` | Per-cell execution sweep: ran? errored (+ename/evalue)? printed? output/MIME types? |
+| `extract-images <notebook> <cell-id> [...] [--out-dir DIR]` | Decode a cell's image outputs (plots) to files you can open/`Read`. Default dir `./tmp`. |
 
 There is **no `delete`** command — see `nb_cells.py --help` for the manual
 deletion recipe.
@@ -63,6 +65,12 @@ python3 nb_cells.py edit analysis.ipynb load-data --file ./tmp/load_data.py
 
 # Add a cell after another
 python3 nb_cells.py add analysis.ipynb --after load-data --file ./tmp/validate.py
+
+# Execution-status sweep across all cells (table form)
+python3 nb_cells.py status analysis.ipynb --human
+
+# Save a cell's plot to a file, then Read it
+python3 nb_cells.py extract-images analysis.ipynb plot-residuals --out-dir ./tmp
 ```
 
 `example_notebook.ipynb` is bundled as a fixture for trying commands against.

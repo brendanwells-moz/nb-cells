@@ -13,13 +13,27 @@ COMMANDS:
       List all cells with their identifiers, types, and a source preview.
       --human prints a plain-text table instead of JSON.
 
-  nb_cells.py read <notebook> <cell-id> [...] [-C N] [-B N] [-A M] [--no-outputs]
-  nb_cells.py get  <notebook> <cell-id> [...] [-C N] [-B N] [-A M] [--no-outputs]
+  nb_cells.py read <notebook> <cell-id> [...] [-C N] [-B N] [-A M] [--no-outputs | --outputs]
+  nb_cells.py get  <notebook> <cell-id> [...] [-C N] [-B N] [-A M] [--no-outputs | --outputs]
       Read one or more cells, including their outputs. ('get' is an alias for 'read'.)
       -C / --context N       Include N cells on BOTH sides (like grep -C).
       -B / --context-before  Include N cells before.
       -A / --context-after   Include M cells after.
-      --no-outputs           Omit cell outputs and execution_count.
+      --no-outputs           Source only (omit outputs and execution_count).
+      --outputs              Outputs only (omit source). The inverse of --no-outputs.
+      When a cell has image outputs, the JSON includes an "image_outputs" count and a
+      "hint" pointing at 'extract-images' (the base64 is never dumped as text).
+
+  nb_cells.py status <notebook> [--cell <cell-id>] [--human]
+      Execution-status sweep across all cells (or one cell with --cell). For each
+      code cell: executed?, execution_count, errored (+ename/evalue), a stream
+      preview, and the output/MIME types it produced. --human prints a table.
+      Use this instead of looping the notebook JSON in raw Python.
+
+  nb_cells.py extract-images <notebook> <cell-id> [...] [--out-dir DIR]
+      Decode a cell's image outputs (image/png, image/jpeg, image/svg+xml) to files
+      and print their paths, so you can then Read them visually. Default --out-dir
+      is ./tmp (typically gitignored). Use this instead of decoding base64 by hand.
 
   nb_cells.py edit <notebook> <cell-id> --file <path>
       Replace a cell's source with content from a file (or stdin).
@@ -81,6 +95,15 @@ EXAMPLES:
   # Read source only (no outputs)
   nb_cells.py read analysis.ipynb load-data --no-outputs
 
+  # Read outputs only (no source)
+  nb_cells.py read analysis.ipynb fit-model --outputs
+
+  # Execution-status sweep (did each cell run / error / print?)
+  nb_cells.py status analysis.ipynb --human
+
+  # Save a cell's plot to a file you can Read
+  nb_cells.py extract-images analysis.ipynb plot-residuals --out-dir ./tmp
+
   # Edit a cell — write new source to a file, then pass with --file
   nb_cells.py edit analysis.ipynb load-data --file /tmp/load_data.py
 
@@ -96,9 +119,10 @@ EXAMPLES:
 
 from __future__ import annotations
 
-__version__ = "0.1.0-beta"
+__version__ = "0.2.0-beta"
 
 import argparse
+import base64
 import json
 import os
 import re
@@ -237,6 +261,103 @@ def format_outputs(outputs: list) -> list:
         else:
             result.append({"output_type": otype, "raw": out})
     return result
+
+
+# Image MIME types we can extract to files, mapped to file extensions.
+IMAGE_MIME_EXT = {
+    "image/png": "png",
+    "image/jpeg": "jpg",
+    "image/svg+xml": "svg",
+}
+
+
+def count_image_outputs(outputs: list) -> int:
+    """Number of rich outputs carrying at least one extractable image."""
+    n = 0
+    for out in outputs:
+        if out.get("output_type") in ("execute_result", "display_data"):
+            if any(m in out.get("data", {}) for m in IMAGE_MIME_EXT):
+                n += 1
+    return n
+
+
+def _filename_prefix(idx: int, cell: dict) -> str:
+    """Filesystem-safe prefix for extracted files: name, else id, else cellN."""
+    base = cell_name(cell) or cell.get("id") or f"cell{idx}"
+    return re.sub(r"[^A-Za-z0-9._-]+", "_", base)
+
+
+def extract_cell_images(idx: int, cell: dict, out_dir: str) -> list:
+    """Decode a cell's image outputs to files in out_dir.
+
+    Returns [{"path": <abspath>, "mime": <mime>}, ...] for each image written.
+    PNG/JPEG are base64-decoded to bytes; SVG is written as UTF-8 text.
+    """
+    written = []
+    for out_i, out in enumerate(cell.get("outputs", [])):
+        if out.get("output_type") not in ("execute_result", "display_data"):
+            continue
+        data = out.get("data", {})
+        for mime, ext in IMAGE_MIME_EXT.items():
+            if mime not in data:
+                continue
+            payload = data[mime]
+            if isinstance(payload, list):
+                payload = "".join(payload)
+            fpath = os.path.join(out_dir, f"{_filename_prefix(idx, cell)}_out{out_i}.{ext}")
+            if mime == "image/svg+xml":
+                with open(fpath, "w", encoding="utf-8") as f:
+                    f.write(payload)
+            else:
+                with open(fpath, "wb") as f:
+                    f.write(base64.b64decode(payload))
+            written.append({"path": os.path.abspath(fpath), "mime": mime})
+    return written
+
+
+def build_cell_status(idx: int, cell: dict) -> dict:
+    """Execution-status summary for one cell (for the `status` command).
+
+    For code cells: did it run, what was its execution_count, did it error
+    (+ename/evalue), did it print to a stream (+preview), and what output/MIME
+    types did it produce. This is the cross-cell sweep that replaces looping the
+    notebook JSON in raw Python.
+    """
+    ctype = cell.get("cell_type", "unknown")
+    info = {"index": idx, "id": cell.get("id"), "name": cell_name(cell), "type": ctype}
+    if ctype != "code":
+        return info
+
+    outputs = cell.get("outputs", [])
+    exec_count = cell.get("execution_count")
+    info["executed"] = exec_count is not None
+    info["execution_count"] = exec_count
+
+    err = next((o for o in outputs if o.get("output_type") == "error"), None)
+    info["errored"] = err is not None
+    if err is not None:
+        info["ename"] = err.get("ename", "")
+        info["evalue"] = err.get("evalue", "")
+
+    stream_parts = []
+    for o in outputs:
+        if o.get("output_type") == "stream":
+            t = o.get("text", "")
+            stream_parts.append("".join(t) if isinstance(t, list) else t)
+    stream_text = "".join(stream_parts)
+    info["has_stream"] = bool(stream_text)
+    if stream_text:
+        preview = " ".join(stream_text.split())
+        info["stream_preview"] = preview[:200] + ("…" if len(preview) > 200 else "")
+
+    info["output_types"] = sorted({o.get("output_type", "") for o in outputs})
+    mimes = set()
+    for o in outputs:
+        if o.get("output_type") in ("execute_result", "display_data"):
+            mimes.update(o.get("data", {}).keys())
+    info["mime_types"] = sorted(mimes)
+    info["image_outputs"] = count_image_outputs(outputs)
+    return info
 
 
 def _sanitize_shell_escapes(source: str) -> str:
@@ -378,6 +499,7 @@ def resolve_cells_with_context(
     context_before: int,
     context_after: int,
     include_outputs: bool = True,
+    include_source: bool = True,
 ) -> list[dict]:
     """
     Resolve a list of identifiers, expand context windows, deduplicate,
@@ -406,7 +528,12 @@ def resolve_cells_with_context(
     for idx in sorted(all_indices):
         c = cells[idx]
         is_ctx = idx not in requested
-        result.append(build_cell_info(idx, c, include_outputs=include_outputs, is_context=is_ctx))
+        result.append(build_cell_info(
+            idx, c,
+            include_outputs=include_outputs,
+            include_source=include_source,
+            is_context=is_ctx,
+        ))
     return result
 
 
@@ -418,6 +545,7 @@ def build_cell_info(
     idx: int,
     cell: dict,
     include_outputs: bool = False,
+    include_source: bool = True,
     is_context: bool = False,
 ) -> dict:
     src = cell_source(cell)
@@ -427,15 +555,24 @@ def build_cell_info(
         "id": cell.get("id"),
         "name": name,
         "type": cell.get("cell_type", "unknown"),
-        "lines": len(src.splitlines()) if src.strip() else 0,
-        "source": src,
     }
+    if include_source:
+        info["lines"] = len(src.splitlines()) if src.strip() else 0
+        info["source"] = src
     if is_context:
         info["is_context"] = True
     if include_outputs:
         raw_outputs = cell.get("outputs", [])
         info["outputs"] = format_outputs(raw_outputs)
         info["execution_count"] = cell.get("execution_count")
+        n_imgs = count_image_outputs(raw_outputs)
+        if n_imgs:
+            ident = name or cell.get("id") or str(idx)
+            info["image_outputs"] = n_imgs
+            info["hint"] = (
+                f"{n_imgs} image output(s) not shown as text — view with: "
+                f"nb_cells.py extract-images <notebook> {ident}"
+            )
     return info
 
 
@@ -495,7 +632,12 @@ def cmd_list(args):
 
 
 def cmd_read(args):
+    if args.outputs_only and args.no_outputs:
+        _die("--outputs and --no-outputs are mutually exclusive: pick source-only, "
+             "outputs-only, or neither (the default shows both).")
     nb = load_notebook(args.notebook)
+    include_outputs = not args.no_outputs
+    include_source = not args.outputs_only
     ctx_before = max(args.context, args.context_before)
     ctx_after = max(args.context, args.context_after)
     cell_infos = resolve_cells_with_context(
@@ -503,9 +645,67 @@ def cmd_read(args):
         args.cell_ids,
         context_before=ctx_before,
         context_after=ctx_after,
-        include_outputs=not args.no_outputs,
+        include_outputs=include_outputs,
+        include_source=include_source,
     )
     print(json.dumps({"cells": cell_infos}, indent=2, ensure_ascii=False))
+
+
+def cmd_extract_images(args):
+    nb = load_notebook(args.notebook)
+    out_dir = args.out_dir
+    os.makedirs(out_dir, exist_ok=True)
+    results = []
+    total = 0
+    for ident in args.cell_ids:
+        idx, cell, _ = resolve_cell(nb, ident)
+        images = extract_cell_images(idx, cell, out_dir)
+        total += len(images)
+        results.append({
+            "cell": {"index": idx, "id": cell.get("id"), "name": cell_name(cell)},
+            "images": images,
+        })
+    print(json.dumps({
+        "out_dir": os.path.abspath(out_dir),
+        "images_written": total,
+        "cells": results,
+    }, indent=2, ensure_ascii=False))
+
+
+def cmd_status(args):
+    nb = load_notebook(args.notebook)
+    cells = nb["cells"]
+    if args.cell:
+        idx, cell, _ = resolve_cell(nb, args.cell)
+        targets = [(idx, cell)]
+    else:
+        targets = list(enumerate(cells))
+    statuses = [build_cell_status(i, c) for i, c in targets]
+
+    if args.human:
+        _print_status_table(statuses)
+    else:
+        print(json.dumps({"total": len(statuses), "cells": statuses}, indent=2, ensure_ascii=False))
+
+
+def _print_status_table(statuses: list):
+    rows = []
+    for s in statuses:
+        if s.get("type") != "code":
+            rows.append((str(s["index"]), s.get("name") or "", s.get("type", ""), "", "", "", ""))
+            continue
+        exec_s = str(s.get("execution_count")) if s.get("executed") else "-"
+        err_s = s.get("ename", "") if s.get("errored") else "-"
+        stream_s = "Y" if s.get("has_stream") else "-"
+        mime_s = ",".join(m.split("/")[-1] for m in s.get("mime_types", [])) or "-"
+        rows.append((str(s["index"]), s.get("name") or "", s["type"], exec_s, err_s, stream_s, mime_s))
+    headers = ("IDX", "NAME", "TYPE", "EXEC", "ERR", "STREAM", "MIME")
+    widths = [max(len(h), max((len(r[i]) for r in rows), default=0)) for i, h in enumerate(headers)]
+    fmt = "  ".join(f"{{:<{w}}}" for w in widths)
+    print(fmt.format(*headers))
+    print("  ".join("-" * w for w in widths))
+    for r in rows:
+        print(fmt.format(*r))
 
 
 def cmd_edit(args):
@@ -872,6 +1072,8 @@ def build_parser() -> argparse.ArgumentParser:
                         help="Include M cells after each requested cell")
     p_read.add_argument("--no-outputs", action="store_true", dest="no_outputs",
                         help="Omit cell outputs and execution_count (source only)")
+    p_read.add_argument("--outputs", action="store_true", dest="outputs_only",
+                        help="Show ONLY outputs (omit source) — the inverse of --no-outputs")
 
     # edit
     p_edit = sub.add_parser(
@@ -940,6 +1142,28 @@ def build_parser() -> argparse.ArgumentParser:
     pos_group_m.add_argument("--end", action="store_true", default=False,
                              help="Move to the end of the notebook")
 
+    # status
+    p_status = sub.add_parser(
+        "status",
+        help="Execution-status sweep: per code cell — ran? errored? printed? output types?",
+    )
+    p_status.add_argument("notebook", help="Path to .ipynb file")
+    p_status.add_argument("--cell", metavar="cell-id", default=None,
+                          help="Limit to a single cell (name, cell id, or index); default: all cells")
+    p_status.add_argument("--human", action="store_true",
+                          help="Print a plain-text table instead of JSON")
+
+    # extract-images
+    p_extract = sub.add_parser(
+        "extract-images",
+        help="Save a cell's image outputs (e.g. plots) to files you can then Read.",
+    )
+    p_extract.add_argument("notebook", help="Path to .ipynb file")
+    p_extract.add_argument("cell_ids", nargs="+", metavar="cell-id",
+                           help="One or more cell identifiers (name, cell id, or index)")
+    p_extract.add_argument("--out-dir", dest="out_dir", default="./tmp", metavar="DIR",
+                           help="Directory to write images into (default: ./tmp, typically gitignored)")
+
     return parser
 
 
@@ -955,6 +1179,8 @@ def main():
         "add": cmd_add,
         "import": cmd_import,
         "move": cmd_move,
+        "status": cmd_status,
+        "extract-images": cmd_extract_images,
     }
     dispatch[args.command](args)
 
